@@ -12,7 +12,7 @@ const categoriesRoutes = require("./routes/categories");
 
 const app = express();
 const PORT = process.env.PORT || 8080;
-const MONGODB_URI = process.env.MONGODB_URI;
+const MONGODB_URI = process.env.MONGODB_URI || process.env.DATABASE_URL || "";
 const MONGODB_DB = process.env.MONGODB_DB || "ExpenseManager";
 
 if (!MONGODB_URI) {
