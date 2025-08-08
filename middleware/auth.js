@@ -1,17 +1,29 @@
 // middleware/auth.js
-// Placeholder for real Clerk/Auth0 JWT validation
+
+const ALLOW_NO_AUTH = process.env.ALLOW_NO_AUTH === "true";
+const MOCK_USER_ID = "000000000000000000000001";
+const MOCK_WORKSPACE_ID = "000000000000000000000002";
 
 module.exports = function (req, res, next) {
-  // In production: verify JWT from Authorization header
   const authHeader = req.headers.authorization;
-  if (!authHeader) return res.status(401).json({ error: "Missing Authorization header" });
 
-  // TEMP: mock decoded token
-  // TODO: replace with actual JWT verification
+  if (!authHeader) {
+    if (ALLOW_NO_AUTH) {
+      req.user = {
+        userId: MOCK_USER_ID,
+        workspaceId: MOCK_WORKSPACE_ID,
+        role: "owner",
+      };
+      return next();
+    }
+    return res.status(401).json({ error: "Missing Authorization header" });
+  }
+
+  // TODO: replace with real JWT verification later
   req.user = {
-    userId: "mock-user-id",
-    workspaceId: "mock-workspace-id",
-    role: "owner"
+    userId: MOCK_USER_ID,
+    workspaceId: MOCK_WORKSPACE_ID,
+    role: "owner",
   };
 
   next();
