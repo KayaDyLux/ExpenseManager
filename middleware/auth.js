@@ -1,29 +1,20 @@
 // middleware/auth.js
+// Temporary mock until JWT verification is added
 
-const ALLOW_NO_AUTH = process.env.ALLOW_NO_AUTH === "true";
-const MOCK_USER_ID = "000000000000000000000001";
-const MOCK_WORKSPACE_ID = "000000000000000000000002";
+const MOCK_USER_ID = "000000000000000000000001";       // valid ObjectId
+const MOCK_WORKSPACE_ID = "000000000000000000000002";  // valid ObjectId
 
 module.exports = function (req, res, next) {
   const authHeader = req.headers.authorization;
-
   if (!authHeader) {
-    if (ALLOW_NO_AUTH) {
-      req.user = {
-        userId: MOCK_USER_ID,
-        workspaceId: MOCK_WORKSPACE_ID,
-        role: "owner",
-      };
-      return next();
-    }
     return res.status(401).json({ error: "Missing Authorization header" });
   }
 
-  // TODO: replace with real JWT verification later
+  // TODO: replace this with real JWT verification (Clerk/Auth0)
   req.user = {
     userId: MOCK_USER_ID,
     workspaceId: MOCK_WORKSPACE_ID,
-    role: "owner",
+    role: "owner"
   };
 
   next();
