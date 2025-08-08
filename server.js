@@ -1,6 +1,7 @@
 const express = require("express");
 const cors = require("cors");
 const { MongoClient } = require("mongodb");
+const path = require("path");
 require("dotenv").config();
 
 // Routes
@@ -15,18 +16,19 @@ const MONGODB_URI = process.env.MONGODB_URI;
 const MONGODB_DB = process.env.MONGODB_DB || "ExpenseManager";
 
 if (!MONGODB_URI) {
-  // Fail fast if not configured in DO env vars
   console.error("Missing MONGODB_URI env var");
   process.exit(1);
 }
 
 // ---------- CORS (BEFORE routes) ----------
 app.use(cors({
-  // while testing you can use ["*"]; for production, lock this to your frontend domain(s)
-  origin: ["*"], // change later to: ["https://YOUR-FRONTEND.DOMAIN"]
+  origin: [
+    "http://localhost:5173",
+    "https://walrus-app-vkptp.ondigitalocean.app" // your DO frontend (or same domain)
+  ],
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Authorization", "Content-Type"],
-  credentials: true,
+  credentials: false, // use bearer tokens, not cookies
 }));
 
 // ---------- Body parsing ----------
@@ -44,7 +46,7 @@ app.get("/health", async (req, res) => {
 });
 
 // Optional: a friendly public root (remove if you want pure API)
-app.get("/", (req, res) => {
+app.get("/api", (req, res) => {
   res.json({
     app: "Expense Manager API",
     status: "ok",
@@ -64,32 +66,12 @@ app.use("/categories", categoriesRoutes);
 app.use("/buckets", bucketsRoutes);
 app.use("/expenses", expensesRoutes);
 
-// ---------- Mongo connection (single, reused) ----------
-let client;
-async function init() {
-  client = new MongoClient(MONGODB_URI);
-  await client.connect();
-  const db = client.db(MONGODB_DB);
-  app.locals.db = db;
+// ---------- Serve SPA (built frontend) ----------
+const publicDir = path.join(__dirname, "public");
+app.use(express.static(publicDir)); // serves /index.html, /assets/* etc.
 
-  // Make db available to routes via req.db if you want:
-  app.use((req, _res, next) => {
-    req.db = db;
-    next();
-  });
-
-  app.listen(PORT, () => {
-    console.log(`Server listening on port ${PORT}`);
-  });
-}
-
-init().catch((err) => {
-  console.error("Failed to start server:", err);
-  process.exit(1);
-});
-
-// Graceful shutdown
-process.on("SIGTERM", async () => {
-  try { await client?.close(); } catch (_) {}
-  process.exit(0);
-});
+// SPA fallback: send index.html for any non-API GET so client routing works
+app.get("*", (req, res) => {
+  // let API routes 404 naturally; everything else -> index.html
+  const apiPrefixes = ["/api", "/health", "/categories", "/buckets", "/expenses"];
+  if (apiPrefixes.some(p => req.pa
