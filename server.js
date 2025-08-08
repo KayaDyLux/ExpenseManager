@@ -1,28 +1,54 @@
-const http = require('http');
-const { initDb } = require('./db');
+// server.js
 
-const PORT = process.env.PORT || 8080;
+const express = require("express");
+const { MongoClient } = require("mongodb");
+const auth = require("./middleware/auth");
+const bucketsRoutes = require("./routes/buckets");
+const expensesRoutes = require("./routes/expenses");
 
-const server = http.createServer(async (req, res) => {
-  try {
-    if (req.url === '/health') {
-      const db = await initDb();
-      await db.command({ ping: 1 });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ status: 'ok', mongo: 'up', time: new Date().toISOString() }));
-      return;
-    }
-    if (req.url === '/') {
-      res.writeHead(200, { 'Content-Type': 'text/plain' });
-      res.end('Hello from Expense Manager API (MongoDB ready)!');
-      return;
-    }
-    res.writeHead(404, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Not found' }));
-  } catch (err) {
-    res.writeHead(500, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ status: 'error', message: err.message }));
-  }
-});
+const app = express();
 
-server.listen(PORT, () => console.log(`Server listening on ${PORT}`));
+// Read env vars set in DigitalOcean
+const mongoUri = process.env.MONGODB_URI;
+const dbName = process.env.MONGODB_DB || "ExpenseManager";
+const port = process.env.PORT || 8080;
+
+if (!mongoUri) {
+  console.error("❌ MONGODB_URI is not set");
+  process.exit(1);
+}
+
+// Parse JSON bodies
+app.use(express.json());
+
+// Connect once, then start server
+MongoClient.connect(mongoUri)
+  .then(client => {
+    console.log("✅ Connected to MongoDB");
+    const db = client.db(dbName);
+
+    // Make db available to routes
+    app.locals.db = db;
+    app.locals.client = client;
+
+    // Public health check
+    app.get("/health", (req, res) => {
+      res.json({ status: "ok", mongo: "up", time: new Date().toISOString() });
+    });
+
+    // Everything below requires auth (mock for now)
+    app.use(auth);
+
+    // Routes
+    app.use("/buckets", bucketsRoutes);
+    app.use("/expenses", expensesRoutes);
+
+    // Start
+    app.listen(port, () => {
+      console.log(`🚀 Server running on port ${port}`);
+    });
+  })
+  .catch(err => {
+    console.error("❌ MongoDB connection error:", err);
+    process.exit(1);
+  });
