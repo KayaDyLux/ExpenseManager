@@ -1,12 +1,11 @@
 {
   "name": "expense-manager-api",
   "version": "1.0.0",
-  "description": "Minimal Node.js API for Expense Manager (MongoDB)",
+  "description": "Expense Manager API (MongoDB, Express)",
   "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
+  "scripts": { "start": "node server.js" },
   "dependencies": {
+    "express": "^4.19.2",
     "mongodb": "^6.8.0"
   }
 }
