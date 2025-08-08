@@ -5,6 +5,7 @@ const { MongoClient } = require("mongodb");
 const auth = require("./middleware/auth");
 const bucketsRoutes = require("./routes/buckets");
 const expensesRoutes = require("./routes/expenses");
+const categoriesRoutes = require("./routes/categories");
 
 const app = express();
 
@@ -20,6 +21,9 @@ if (!mongoUri) {
 
 // Parse JSON bodies
 app.use(express.json());
+
+// Serve the public folder at /
+app.use(express.static("public"));
 
 // Connect once, then start server
 MongoClient.connect(mongoUri)
@@ -40,6 +44,7 @@ MongoClient.connect(mongoUri)
     app.use(auth);
 
     // Routes
+    app.use("/categories", categoriesRoutes);
     app.use("/buckets", bucketsRoutes);
     app.use("/expenses", expensesRoutes);
 
