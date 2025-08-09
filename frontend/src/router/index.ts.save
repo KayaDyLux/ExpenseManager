@@ -1,0 +1,6 @@
+
+const routes = [
+  { path: '/', component: HomeView },
+  // other routes...
+]
+
