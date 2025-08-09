@@ -1,57 +1,53 @@
 // middleware/auth.js
-// Production-ready JWT verification with a safe dev toggle.
-// npm i jose
+const { Magic } = require('@magic-sdk/admin');
 
-const { createRemoteJWKSet, jwtVerify } = require("jose");
+// Secret from Magic dashboard (DO env var)
+const magic = new Magic(process.env.MAGIC_SECRET_KEY);
 
-// Env vars in DO App Platform:
-// AUTH_ISSUER  -> e.g. https://YOURTENANT.us.auth0.com  OR  https://your-subdomain.clerk.accounts.dev
-// AUTH_AUDIENCE (optional) -> only if your IdP sets it
-// ALLOW_TEST_TOKEN=true -> keeps Postman working with "Bearer test" during transition
-const ISSUER = process.env.AUTH_ISSUER;
-const AUDIENCE = process.env.AUTH_AUDIENCE;
-const ALLOW_TEST_TOKEN = process.env.ALLOW_TEST_TOKEN === "true";
+// Optional: who always bypasses allowlist
+const OWNER_EMAIL = (process.env.OWNER_EMAIL || 'swapna@swapnade.com').toLowerCase();
 
-let JWKS;
-if (ISSUER) {
-  JWKS = createRemoteJWKSet(new URL(`${ISSUER}/.well-known/jwks.json`));
-}
+// Optional: turn API-side allowlist on/off (default: ON)
+const ENFORCE_ALLOWLIST = (process.env.ENFORCE_ALLOWLIST || 'true').toLowerCase() !== 'false';
 
-module.exports = async (req, res, next) => {
-  const auth = req.headers.authorization || "";
-  const token = auth.startsWith("Bearer ") ? auth.slice(7) : null;
-  if (!token) return res.status(401).json({ error: "Missing Authorization header" });
-
-  // Dev compatibility: allow "Bearer test" while you wire the frontend
-  if (ALLOW_TEST_TOKEN && token === "test") {
-    req.user = {
-      userId: "dev-user",
-      workspaceId: "000000000000000000000002",
-      role: "owner",
-      _dev: true,
-    };
-    return next();
-  }
-
-  if (!ISSUER) {
-    return res.status(501).json({ error: "Auth not configured (AUTH_ISSUER missing)" });
-  }
-
+module.exports = async function auth(req, res, next) {
   try {
-    const { payload } = await jwtVerify(token, JWKS, {
-      issuer: ISSUER,
-      audience: AUDIENCE, // remove if your IdP doesn’t use audience
-    });
+    // Expect: Authorization: Bearer <DID_TOKEN>
+    const h = req.headers.authorization || '';
+    if (!h.startsWith('Bearer ')) {
+      return res.status(401).json({ error: 'Missing Authorization header' });
+    }
+    const didToken = h.slice(7).trim();
 
-    // Map IdP claims -> your app fields (adjust if your IdP uses different claim names)
-    req.user = {
-      userId: payload.sub,
-      workspaceId: payload.org_id || payload.orgId || payload.workspaceId || null,
-      role: payload.role || "member",
-    };
+    // Validate Magic DID token
+    await magic.token.validate(didToken);
+    const issuer = magic.token.getIssuer(didToken);
+
+    // Grab user metadata (email, etc.)
+    const meta = await magic.users.getMetadataByIssuer(issuer);
+    const email = (meta?.email || '').toLowerCase();
+
+    // Attach to request for your routes
+    req.user = { issuer, email };
+
+    // Optional API-side allowlist (email or domain)
+    if (ENFORCE_ALLOWLIST) {
+      if (email !== OWNER_EMAIL) {
+        const db = req.app?.locals?.db;
+        if (!db) return res.status(503).json({ error: 'db_unavailable' });
+
+        const domain = email.split('@')[1] || '';
+        const allowHit = await db.collection('allowlist').findOne({
+          $or: [{ type: 'email', value: email }, { type: 'domain', value: domain }],
+        });
+
+        if (!allowHit) return res.status(403).json({ error: 'not_allowed' });
+      }
+    }
 
     next();
   } catch (err) {
-    res.status(401).json({ error: "Invalid token", detail: err.message });
+    // Token invalid/expired/etc.
+    return res.status(401).json({ error: 'invalid_token' });
   }
 };
