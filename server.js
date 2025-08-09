@@ -1,44 +1,51 @@
+// server.js
 const express = require("express");
 const cors = require("cors");
 const { MongoClient } = require("mongodb");
 const path = require("path");
+const fs = require("fs");
 require("dotenv").config();
 
-// Routes (your existing files)
+// ----- Routes (your existing files) -----
 const auth = require("./middleware/auth");
 const bucketsRoutes = require("./routes/buckets");
 const expensesRoutes = require("./routes/expenses");
 const categoriesRoutes = require("./routes/categories");
 
+// ----- App & Config -----
 const app = express();
 const PORT = process.env.PORT || 8080;
 
 // Prefer MONGODB_URI, fall back to DO's DATABASE_URL
 const MONGODB_URI = process.env.MONGODB_URI || process.env.DATABASE_URL || "";
-const MONGODB_DB  = process.env.MONGODB_DB || "ExpenseManager";
+const MONGODB_DB = process.env.MONGODB_DB || "ExpenseManager";
 
+// The one owner who is always allowed
+const OWNER_EMAIL = "swapna@swapnade.com";
+
+// Basic env validation
 if (!MONGODB_URI) {
   console.error("Missing MONGODB_URI/DATABASE_URL env var");
   process.exit(1);
 }
 
-// ---------- CORS ----------
+// ----- CORS -----
 app.use(
   cors({
     origin: [
       "http://localhost:5173",
-      "https://walrus-app-vkptp.ondigitalocean.app", // your DO site
+      "https://walrus-app-vkptp.ondigitalocean.app", // your DO frontend
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Authorization", "Content-Type", "x-allowlist-key"],
-    credentials: false, // Bearer tokens, not cookies
+    credentials: false, // we use Bearer tokens, not cookies
   })
 );
 
-// ---------- Body parsing ----------
+// ----- Body parsing -----
 app.use(express.json());
 
-// ---------- Public routes ----------
+// ----- Public routes -----
 app.get("/health", async (req, res) => {
   try {
     const db = req.app.locals.db;
@@ -64,11 +71,10 @@ app.get("/api", (_req, res) => {
   });
 });
 
-/* ---------- Allow-list check (for Auth0 Post-Login Action) ---------- */
-const OWNER_EMAIL = "swapna@swapnade.com";
-
-// GET /auth/allowlist/check?email=foo@bar.com
-// Protected by header: x-allowlist-key = process.env.ALLOWLIST_API_KEY
+/* ----- Allow-list check (for Auth0 Post-Login Action) -----
+   Call:  GET /auth/allowlist/check?email=user@domain.com
+   Header: x-allowlist-key: <process.env.ALLOWLIST_API_KEY>
+----------------------------------------------------------- */
 app.get("/auth/allowlist/check", async (req, res) => {
   try {
     const key = req.headers["x-allowlist-key"];
@@ -76,7 +82,8 @@ app.get("/auth/allowlist/check", async (req, res) => {
       return res.status(401).json({ error: "unauthorized" });
     }
 
-    const email = String(req.query.email || "").toLowerCase();
+    const raw = String(req.query.email || "");
+    const email = raw.toLowerCase();
     const domain = email.split("@")[1] || "";
 
     // Owner always allowed
@@ -94,38 +101,45 @@ app.get("/auth/allowlist/check", async (req, res) => {
     return res.status(500).json({ error: "server_error", detail: e.message });
   }
 });
-/* ------------------------------------------------------------------- */
 
-// ---------- Auth-protected routes ----------
+// ----- Auth-protected app routes -----
 app.use(auth);
 app.use("/categories", categoriesRoutes);
 app.use("/buckets", bucketsRoutes);
 app.use("/expenses", expensesRoutes);
 
-// ---------- Serve SPA (built frontend) ----------
-const publicDir = path.join(__dirname, "public");
+// ----- Serve SPA (built frontend) -----
+// Prefer /dist if present, otherwise /public
+const distDir = path.join(__dirname, "dist");
+const publicDir = fs.existsSync(distDir) ? distDir : path.join(__dirname, "public");
+
 app.use(express.static(publicDir)); // serves /index.html, /assets/* etc.
 
 // SPA fallback: send index.html for any non-API GET so client routing works
 app.get("*", (req, res) => {
   const apiPrefixes = ["/api", "/health", "/categories", "/buckets", "/expenses", "/auth/allowlist"];
   const isApi = apiPrefixes.some((p) => req.path.startsWith(p));
-  if (isApi) {
-    return res.status(404).json({ error: "Not found" });
-  }
+  if (isApi) return res.status(404).json({ error: "Not found" });
   return res.sendFile(path.join(publicDir, "index.html"));
 });
 
-// ---------- Mongo connection then start server ----------
+// ----- Mongo connection then start server -----
 let client;
 async function init() {
   try {
     console.log("Connecting to MongoDB...");
-    client = new MongoClient(MONGODB_URI);
+    client = new MongoClient(MONGODB_URI, {
+      maxPoolSize: 10,
+      serverSelectionTimeoutMS: 10000, // fail fast on bad URI/creds
+    });
     await client.connect();
 
     const db = client.db(MONGODB_DB);
     await db.command({ ping: 1 }); // verify DB reachable
+
+    // Ensure allowlist has a helpful/unique index
+    await db.collection("allowlist").createIndex({ type: 1, value: 1 }, { unique: true });
+
     app.locals.db = db;
     console.log(`Mongo connected to database: ${db.databaseName}`);
 
@@ -143,7 +157,7 @@ init().catch((err) => {
   process.exit(1);
 });
 
-// Graceful shutdown
+// ----- Graceful shutdown -----
 process.on("SIGTERM", async () => {
   try {
     await client?.close();
