@@ -8,11 +8,11 @@ on:
       - ".github/workflows/build-frontend.yml"
   workflow_dispatch:
 
-# Allow the workflow to push the updated /public back to main
+# allow the workflow to commit back to the repo
 permissions:
   contents: write
 
-# Avoid overlapping runs
+# avoid overlapping runs per branch
 concurrency:
   group: build-frontend-${{ github.ref }}
   cancel-in-progress: true
@@ -25,7 +25,8 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0          # needed to commit back
+          persist-credentials: true
 
       - name: Use Node.js 20
         uses: actions/setup-node@v4
@@ -47,11 +48,15 @@ jobs:
           cp -R frontend/dist/. public/
 
       - name: Commit & push updated /public (on main)
-        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        # allow push on normal commits AND manual dispatches
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        env:
+          GIT_AUTHOR_NAME: github-actions[bot]
+          GIT_AUTHOR_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
+          GIT_COMMITTER_NAME: github-actions[bot]
+          GIT_COMMITTER_EMAIL: 41898282+github-actions[bot]@users.noreply.github.com
         run: |
           if [[ -n "$(git status --porcelain -- public)" ]]; then
-            git config user.name  "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add public
             git commit -m "chore(frontend): update public from ${GITHUB_SHA::7}"
             git push
