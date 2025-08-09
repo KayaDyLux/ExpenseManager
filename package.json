@@ -1,11 +1,31 @@
 {
-  "name": "expense-manager-api",
+  "name": "expensemanager-api",
   "version": "1.0.0",
-  "description": "Expense Manager API (MongoDB, Express)",
+  "private": true,
+  "description": "Expense Manager backend (Express + MongoDB) serving the built SPA from /public",
+  "type": "commonjs",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "jsonwebtoken": "^9.0.2",
+    "jwks-rsa": "^3.1.0",
     "mongodb": "^6.8.0"
-  }
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.4"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/KayaDyLux/ExpenseManager.git"
+  },
+  "license": "UNLICENSED"
 }
