@@ -6,30 +6,26 @@ const path = require("path");
 const fs = require("fs");
 require("dotenv").config();
 
-// ----- Routes (your existing files) -----
-const auth = require("./middleware/auth");
+// ---- Routes & middleware ----
+const auth = require("./middleware/auth"); // Magic-based auth middleware
 const bucketsRoutes = require("./routes/buckets");
 const expensesRoutes = require("./routes/expenses");
 const categoriesRoutes = require("./routes/categories");
 
-// ----- App & Config -----
+// ---- App setup ----
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Prefer MONGODB_URI, fall back to DO's DATABASE_URL
+// Prefer explicit URI; fall back to DO DATABASE_URL
 const MONGODB_URI = process.env.MONGODB_URI || process.env.DATABASE_URL || "";
 const MONGODB_DB = process.env.MONGODB_DB || "ExpenseManager";
 
-// The one owner who is always allowed
-const OWNER_EMAIL = "swapna@swapnade.com";
-
-// Basic env validation
 if (!MONGODB_URI) {
   console.error("Missing MONGODB_URI/DATABASE_URL env var");
   process.exit(1);
 }
 
-// ----- CORS -----
+// ---- CORS ----
 app.use(
   cors({
     origin: [
@@ -37,15 +33,15 @@ app.use(
       "https://walrus-app-vkptp.ondigitalocean.app", // your DO frontend
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type", "x-allowlist-key"],
+    allowedHeaders: ["Authorization", "Content-Type"],
     credentials: false, // we use Bearer tokens, not cookies
   })
 );
 
-// ----- Body parsing -----
+// ---- Body parsing ----
 app.use(express.json());
 
-// ----- Public routes -----
+// ---- Public routes ----
 app.get("/health", async (req, res) => {
   try {
     const db = req.app.locals.db;
@@ -56,7 +52,6 @@ app.get("/health", async (req, res) => {
   }
 });
 
-// Optional API root
 app.get("/api", (_req, res) => {
   res.json({
     app: "Expense Manager API",
@@ -71,59 +66,28 @@ app.get("/api", (_req, res) => {
   });
 });
 
-/* ----- Allow-list check (for Auth0 Post-Login Action) -----
-   Call:  GET /auth/allowlist/check?email=user@domain.com
-   Header: x-allowlist-key: <process.env.ALLOWLIST_API_KEY>
------------------------------------------------------------ */
-app.get("/auth/allowlist/check", async (req, res) => {
-  try {
-    const key = req.headers["x-allowlist-key"];
-    if (!key || key !== process.env.ALLOWLIST_API_KEY) {
-      return res.status(401).json({ error: "unauthorized" });
-    }
-
-    const raw = String(req.query.email || "");
-    const email = raw.toLowerCase();
-    const domain = email.split("@")[1] || "";
-
-    // Owner always allowed
-    if (email === OWNER_EMAIL) return res.json({ allowed: true });
-
-    const db = req.app.locals.db;
-    if (!db) return res.json({ allowed: false });
-
-    const hit = await db.collection("allowlist").findOne({
-      $or: [{ type: "email", value: email }, { type: "domain", value: domain }],
-    });
-
-    return res.json({ allowed: !!hit });
-  } catch (e) {
-    return res.status(500).json({ error: "server_error", detail: e.message });
-  }
-});
-
-// ----- Auth-protected app routes -----
+// ---- Protected app routes (require Magic token) ----
 app.use(auth);
 app.use("/categories", categoriesRoutes);
 app.use("/buckets", bucketsRoutes);
 app.use("/expenses", expensesRoutes);
 
-// ----- Serve SPA (built frontend) -----
-// Prefer /dist if present, otherwise /public
+// ---- Serve SPA (built frontend) ----
+// Prefer /dist (Vite build). Fallback to /public if /dist doesn't exist.
 const distDir = path.join(__dirname, "dist");
 const publicDir = fs.existsSync(distDir) ? distDir : path.join(__dirname, "public");
 
-app.use(express.static(publicDir)); // serves /index.html, /assets/* etc.
+app.use(express.static(publicDir)); // serves /index.html and /assets/*
 
 // SPA fallback: send index.html for any non-API GET so client routing works
 app.get("*", (req, res) => {
-  const apiPrefixes = ["/api", "/health", "/categories", "/buckets", "/expenses", "/auth/allowlist"];
+  const apiPrefixes = ["/api", "/health", "/categories", "/buckets", "/expenses"];
   const isApi = apiPrefixes.some((p) => req.path.startsWith(p));
   if (isApi) return res.status(404).json({ error: "Not found" });
   return res.sendFile(path.join(publicDir, "index.html"));
 });
 
-// ----- Mongo connection then start server -----
+// ---- Mongo connection then start server ----
 let client;
 async function init() {
   try {
@@ -137,8 +101,8 @@ async function init() {
     const db = client.db(MONGODB_DB);
     await db.command({ ping: 1 }); // verify DB reachable
 
-    // Ensure allowlist has a helpful/unique index
-    await db.collection("allowlist").createIndex({ type: 1, value: 1 }, { unique: true });
+    // Helpful index if you keep an allowlist collection (email/domain)
+    await db.collection("allowlist").createIndex({ type: 1, value: 1 }, { unique: true }).catch(() => {});
 
     app.locals.db = db;
     console.log(`Mongo connected to database: ${db.databaseName}`);
@@ -157,10 +121,8 @@ init().catch((err) => {
   process.exit(1);
 });
 
-// ----- Graceful shutdown -----
+// ---- Graceful shutdown ----
 process.on("SIGTERM", async () => {
-  try {
-    await client?.close();
-  } catch (_) {}
+  try { await client?.close(); } catch (_) {}
   process.exit(0);
 });
