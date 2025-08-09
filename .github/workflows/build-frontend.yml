@@ -6,6 +6,9 @@ on:
     paths:
       - "frontend/**"
       - ".github/workflows/build-frontend.yml"
+      
+permissions:
+  contents: write
 
 jobs:
   build-and-publish:
