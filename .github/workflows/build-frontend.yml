@@ -6,29 +6,35 @@ on:
     paths:
       - "frontend/**"
       - ".github/workflows/build-frontend.yml"
-      
+  workflow_dispatch:
+
+# Allow the workflow to push the updated /public back to main
 permissions:
   contents: write
+
+# Avoid overlapping runs
+concurrency:
+  group: build-frontend-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-and-publish:
     runs-on: ubuntu-latest
-    env:
-      VITE_AUTH0_DOMAIN: ${{ secrets.VITE_AUTH0_DOMAIN }}
-      VITE_AUTH0_CLIENT_ID: ${{ secrets.VITE_AUTH0_CLIENT_ID }}
-      VITE_AUTH0_AUDIENCE: ${{ secrets.VITE_AUTH0_AUDIENCE }}
-    steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
 
-      - name: Use Node
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Use Node.js 20
         uses: actions/setup-node@v4
         with:
           node-version: 20
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
-      - name: Install & build (frontend/)
+      - name: Install deps & build (frontend/)
         working-directory: frontend
         run: |
           npm ci
@@ -38,15 +44,16 @@ jobs:
         run: |
           rm -rf public
           mkdir -p public
-          cp -R frontend/dist/* public/
+          cp -R frontend/dist/. public/
 
-      - name: Commit & push if changed
+      - name: Commit & push updated /public (on main)
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         run: |
-          if [ -n "$(git status --porcelain)" ]; then
-            git config user.name "github-actions[bot]"
+          if [[ -n "$(git status --porcelain -- public)" ]]; then
+            git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add public
-            git commit -m "chore(frontend): update public from $GITHUB_SHA"
+            git commit -m "chore(frontend): update public from ${GITHUB_SHA::7}"
             git push
           else
             echo "No changes to publish."
