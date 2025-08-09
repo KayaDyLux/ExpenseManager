@@ -13,10 +13,9 @@ const categoriesRoutes = require("./routes/categories");
 const app = express();
 const PORT = process.env.PORT || 8080;
 
-// Use env-provided URI. Prefer MONGODB_URI, fall back to DO's DATABASE_URL.
+// Prefer MONGODB_URI, fall back to DO's DATABASE_URL
 const MONGODB_URI = process.env.MONGODB_URI || process.env.DATABASE_URL || "";
-// App database (the DB where your collections live)
-const MONGODB_DB = process.env.MONGODB_DB || "ExpenseManager";
+const MONGODB_DB  = process.env.MONGODB_DB || "ExpenseManager";
 
 if (!MONGODB_URI) {
   console.error("Missing MONGODB_URI/DATABASE_URL env var");
@@ -31,8 +30,8 @@ app.use(
       "https://walrus-app-vkptp.ondigitalocean.app", // your DO site
     ],
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Authorization", "Content-Type"],
-    credentials: false, // we use Bearer tokens, not cookies
+    allowedHeaders: ["Authorization", "Content-Type", "x-allowlist-key"],
+    credentials: false, // Bearer tokens, not cookies
   })
 );
 
@@ -65,6 +64,38 @@ app.get("/api", (_req, res) => {
   });
 });
 
+/* ---------- Allow-list check (for Auth0 Post-Login Action) ---------- */
+const OWNER_EMAIL = "swapna@swapnade.com";
+
+// GET /auth/allowlist/check?email=foo@bar.com
+// Protected by header: x-allowlist-key = process.env.ALLOWLIST_API_KEY
+app.get("/auth/allowlist/check", async (req, res) => {
+  try {
+    const key = req.headers["x-allowlist-key"];
+    if (!key || key !== process.env.ALLOWLIST_API_KEY) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+
+    const email = String(req.query.email || "").toLowerCase();
+    const domain = email.split("@")[1] || "";
+
+    // Owner always allowed
+    if (email === OWNER_EMAIL) return res.json({ allowed: true });
+
+    const db = req.app.locals.db;
+    if (!db) return res.json({ allowed: false });
+
+    const hit = await db.collection("allowlist").findOne({
+      $or: [{ type: "email", value: email }, { type: "domain", value: domain }],
+    });
+
+    return res.json({ allowed: !!hit });
+  } catch (e) {
+    return res.status(500).json({ error: "server_error", detail: e.message });
+  }
+});
+/* ------------------------------------------------------------------- */
+
 // ---------- Auth-protected routes ----------
 app.use(auth);
 app.use("/categories", categoriesRoutes);
@@ -77,7 +108,7 @@ app.use(express.static(publicDir)); // serves /index.html, /assets/* etc.
 
 // SPA fallback: send index.html for any non-API GET so client routing works
 app.get("*", (req, res) => {
-  const apiPrefixes = ["/api", "/health", "/categories", "/buckets", "/expenses"];
+  const apiPrefixes = ["/api", "/health", "/categories", "/buckets", "/expenses", "/auth/allowlist"];
   const isApi = apiPrefixes.some((p) => req.path.startsWith(p));
   if (isApi) {
     return res.status(404).json({ error: "Not found" });
@@ -94,8 +125,7 @@ async function init() {
     await client.connect();
 
     const db = client.db(MONGODB_DB);
-    // quick ping to verify the DB is reachable
-    await db.command({ ping: 1 });
+    await db.command({ ping: 1 }); // verify DB reachable
     app.locals.db = db;
     console.log(`Mongo connected to database: ${db.databaseName}`);
 
