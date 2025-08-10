@@ -3,8 +3,33 @@ const express = require('express')
 const { ObjectId } = require('mongodb')
 const router = express.Router()
 const { authRequired, requireWorkspace } = require('../middleware/auth')
+const Joi = require('joi')
+const rateLimit = require('express-rate-limit')
 
-// All category routes require auth
+// --- Validation schemas ---
+const categorySchema = Joi.object({
+  workspaceId: Joi.string().optional(), // workspaceId comes from middleware
+  name: Joi.string().trim().min(1).required(),
+  color: Joi.string().trim().optional().allow(null, ''),
+  icon: Joi.string().trim().optional().allow(null, ''),
+  defaultBudgetId: Joi.string().optional().allow(null, ''),
+})
+
+const categoryPatchSchema = Joi.object({
+  name: Joi.string().trim().min(1).optional(),
+  color: Joi.string().trim().optional().allow(null, ''),
+  icon: Joi.string().trim().optional().allow(null, ''),
+  active: Joi.boolean().optional(),
+})
+
+// --- Rate limiter for bulk routes ---
+const bulkLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 min
+  max: 10, // limit each IP to 10 bulk requests per window
+  message: { error: 'Too many bulk requests, please try later.' },
+})
+
+// --- All category routes require auth ---
 router.use(authRequired)
 
 /**
@@ -28,21 +53,21 @@ router.get('/', requireWorkspace, async (req, res) => {
 
 /**
  * POST /categories
- * body: { workspaceId, name, color?, icon?, defaultBudgetId? }
  */
 router.post('/', requireWorkspace, async (req, res) => {
-  const db = req.app.locals.db
-  const { name, color, icon, defaultBudgetId } = req.body
-  if (!name) return res.status(400).json({ error: 'name is required' })
+  const { error, value } = categorySchema.validate(req.body)
+  if (error) return res.status(400).json({ error: error.message })
 
+  const db = req.app.locals.db
   const now = new Date()
+
   const doc = {
     workspaceId: new ObjectId(req.workspaceId),
-    name,
-    name_lc: String(name).trim().toLowerCase(),
-    color,
-    icon,
-    defaultBudgetId: defaultBudgetId ? new ObjectId(defaultBudgetId) : undefined,
+    name: value.name,
+    name_lc: value.name.toLowerCase(),
+    color: value.color || undefined,
+    icon: value.icon || undefined,
+    defaultBudgetId: value.defaultBudgetId ? new ObjectId(value.defaultBudgetId) : undefined,
     active: true,
     createdAt: now,
     updatedAt: now,
@@ -58,18 +83,23 @@ router.post('/', requireWorkspace, async (req, res) => {
 
 /**
  * PATCH /categories/:id
- * body can include: name, color, icon, active
  */
 router.patch('/:id', requireWorkspace, async (req, res) => {
+  const { error, value } = categoryPatchSchema.validate(req.body)
+  if (error) return res.status(400).json({ error: error.message })
+
   const db = req.app.locals.db
   const _id = new ObjectId(req.params.id)
   const ws = new ObjectId(req.workspaceId)
-
   const $set = { updatedAt: new Date() }
-  ;['name', 'color', 'icon', 'active'].forEach(k => {
-    if (req.body[k] !== undefined) $set[k] = req.body[k]
-  })
-  if ($set.name) $set.name_lc = String($set.name).trim().toLowerCase()
+
+  if (value.name) {
+    $set.name = value.name
+    $set.name_lc = value.name.toLowerCase()
+  }
+  if (value.color !== undefined) $set.color = value.color
+  if (value.icon !== undefined) $set.icon = value.icon
+  if (value.active !== undefined) $set.active = value.active
 
   const r = await db.collection('categories').findOneAndUpdate(
     { _id, workspaceId: ws },
@@ -82,19 +112,17 @@ router.patch('/:id', requireWorkspace, async (req, res) => {
 
 /**
  * PATCH /categories/:id/map-bucket
- * body: { defaultBudgetId: string|null }
  */
 router.patch('/:id/map-bucket', requireWorkspace, async (req, res) => {
   const db = req.app.locals.db
   const _id = new ObjectId(req.params.id)
   const ws = new ObjectId(req.workspaceId)
   const { defaultBudgetId } = req.body
-
   const now = new Date()
+
   if (defaultBudgetId) {
     const budgetId = new ObjectId(defaultBudgetId)
-    const exists = await db.collection('budgets')
-      .findOne({ _id: budgetId, workspaceId: ws, active: { $ne: false } })
+    const exists = await db.collection('budgets').findOne({ _id: budgetId, workspaceId: ws, active: { $ne: false } })
     if (!exists) return res.status(400).json({ error: 'Budget not found in workspace or archived' })
 
     const r = await db.collection('categories').findOneAndUpdate(
@@ -106,7 +134,6 @@ router.patch('/:id/map-bucket', requireWorkspace, async (req, res) => {
     return res.json(r.value)
   }
 
-  // Clear mapping
   const r = await db.collection('categories').findOneAndUpdate(
     { _id, workspaceId: ws },
     { $unset: { defaultBudgetId: '' }, $set: { updatedAt: now } },
@@ -117,7 +144,7 @@ router.patch('/:id/map-bucket', requireWorkspace, async (req, res) => {
 })
 
 /**
- * DELETE /categories/:id   (soft delete)
+ * DELETE /categories/:id (soft delete)
  */
 router.delete('/:id', requireWorkspace, async (req, res) => {
   const db = req.app.locals.db
@@ -131,7 +158,6 @@ router.delete('/:id', requireWorkspace, async (req, res) => {
     { returnDocument: 'after' }
   )
   if (!r.value) return res.status(404).json({ error: 'Category not found or already archived' })
-
   res.json({ ok: true, archivedAt: now.toISOString() })
 })
 
@@ -153,10 +179,9 @@ router.post('/:id/restore', requireWorkspace, async (req, res) => {
 })
 
 /**
- * POST /categories/bulk   (JSON)
- * body: { items: [{ name, color?, icon?, budgetId? }] }
+ * POST /categories/bulk (JSON)
  */
-router.post('/bulk', requireWorkspace, async (req, res) => {
+router.post('/bulk', authRequired, requireWorkspace, bulkLimiter, async (req, res) => {
   const db = req.app.locals.db
   const ws = new ObjectId(req.workspaceId)
   const items = Array.isArray(req.body.items) ? req.body.items : []
@@ -169,7 +194,7 @@ router.post('/bulk', requireWorkspace, async (req, res) => {
     docs.push({
       workspaceId: ws,
       name: it.name,
-      name_lc: String(it.name).trim().toLowerCase(),
+      name_lc: it.name.toLowerCase(),
       color: it.color,
       icon: it.icon,
       defaultBudgetId: it.budgetId ? new ObjectId(it.budgetId) : undefined,
@@ -184,10 +209,9 @@ router.post('/bulk', requireWorkspace, async (req, res) => {
 })
 
 /**
- * POST /categories/bulk-csv?workspaceId=...&createBudgetIfMissing=true
- * body: raw CSV with header: name,color,icon,budgetName
+ * POST /categories/bulk-csv
  */
-router.post('/bulk-csv', requireWorkspace, express.text({ type: '*/*', limit: '1mb' }), async (req, res) => {
+router.post('/bulk-csv', authRequired, requireWorkspace, bulkLimiter, express.text({ type: '*/*', limit: '1mb' }), async (req, res) => {
   const db = req.app.locals.db
   const ws = new ObjectId(req.workspaceId)
   const createBudgetIfMissing = String(req.query.createBudgetIfMissing || 'true') === 'true'
@@ -195,71 +219,76 @@ router.post('/bulk-csv', requireWorkspace, express.text({ type: '*/*', limit: '1
   const text = (req.body || '').trim()
   if (!text) return res.status(400).json({ error: 'CSV body required' })
 
-  const lines = text.split(/\r?\n/).filter(Boolean)
-  const header = lines.shift()
-  if (!header) return res.status(400).json({ error: 'CSV header missing' })
+  try {
+    const lines = text.split(/\r?\n/).filter(Boolean)
+    const header = lines.shift()
+    if (!header) return res.status(400).json({ error: 'CSV header missing' })
 
-  const cols = header.split(',').map(s => s.trim().toLowerCase())
-  const idx = {
-    name: cols.indexOf('name'),
-    color: cols.indexOf('color'),
-    icon: cols.indexOf('icon'),
-    budgetName: cols.indexOf('budgetname'),
-  }
-  if (idx.name === -1) return res.status(400).json({ error: 'CSV must include "name"' })
+    const cols = header.split(',').map(s => s.trim().toLowerCase())
+    const idx = {
+      name: cols.indexOf('name'),
+      color: cols.indexOf('color'),
+      icon: cols.indexOf('icon'),
+      budgetName: cols.indexOf('budgetname'),
+    }
+    if (idx.name === -1) return res.status(400).json({ error: 'CSV must include "name"' })
 
-  const now = new Date()
-  const docs = []
+    const now = new Date()
+    const docs = []
 
-  for (const line of lines) {
-    const parts = line.split(',').map(s => s.trim())
-    const name = parts[idx.name]
-    if (!name) continue
+    for (const line of lines) {
+      const parts = line.split(',').map(s => s.trim())
+      const name = parts[idx.name]
+      if (!name) continue
 
-    let defaultBudgetId
-    if (idx.budgetName !== -1) {
-      const budgetName = (parts[idx.budgetName] || '').trim()
-      if (budgetName) {
-        const budgetNameLc = budgetName.toLowerCase()
-        let budget = await db.collection('budgets')
-          .findOne({ workspaceId: ws, name_lc: budgetNameLc, active: { $ne: false } })
-        if (!budget && createBudgetIfMissing) {
-          const r = await db.collection('budgets').insertOne({
-            workspaceId: ws,
-            name: budgetName,
-            name_lc: budgetNameLc,
-            target: 0,
-            period: 'monthly',
-            active: true,
-            createdAt: now,
-            updatedAt: now,
-          })
-          budget = { _id: r.insertedId }
+      let defaultBudgetId
+      if (idx.budgetName !== -1) {
+        const budgetName = (parts[idx.budgetName] || '').trim()
+        if (budgetName) {
+          const budgetNameLc = budgetName.toLowerCase()
+          let budget = await db.collection('budgets')
+            .findOne({ workspaceId: ws, name_lc: budgetNameLc, active: { $ne: false } })
+          if (!budget && createBudgetIfMissing) {
+            const r = await db.collection('budgets').insertOne({
+              workspaceId: ws,
+              name: budgetName,
+              name_lc: budgetNameLc,
+              target: 0,
+              period: 'monthly',
+              active: true,
+              createdAt: now,
+              updatedAt: now,
+            })
+            budget = { _id: r.insertedId }
+          }
+          if (budget) defaultBudgetId = budget._id
         }
-        if (budget) defaultBudgetId = budget._id
       }
+
+      docs.push({
+        workspaceId: ws,
+        name,
+        name_lc: name.toLowerCase(),
+        color: idx.color !== -1 ? parts[idx.color] || undefined : undefined,
+        icon: idx.icon !== -1 ? parts[idx.icon] || undefined : undefined,
+        defaultBudgetId,
+        active: true,
+        createdAt: now,
+        updatedAt: now,
+      })
     }
 
-    docs.push({
-      workspaceId: ws,
-      name,
-      name_lc: name.toLowerCase(),
-      color: idx.color !== -1 ? parts[idx.color] || undefined : undefined,
-      icon: idx.icon !== -1 ? parts[idx.icon] || undefined : undefined,
-      defaultBudgetId,
-      active: true,
-      createdAt: now,
-      updatedAt: now,
-    })
+    if (!docs.length) return res.status(400).json({ error: 'No valid data rows' })
+    const r = await db.collection('categories').insertMany(docs, { ordered: false })
+    res.status(201).json({ created: r.insertedCount })
+  } catch (err) {
+    console.error('CSV import error:', err) // error logging for debug
+    res.status(500).json({ error: 'Failed to parse/import CSV' })
   }
-
-  if (!docs.length) return res.status(400).json({ error: 'No valid data rows' })
-  const r = await db.collection('categories').insertMany(docs, { ordered: false })
-  res.status(201).json({ created: r.insertedCount })
 })
 
 /**
- * GET /categories/:id/suggest-budget?workspaceId=...
+ * GET /categories/:id/suggest-budget
  */
 router.get('/:id/suggest-budget', requireWorkspace, async (req, res) => {
   const db = req.app.locals.db
@@ -270,8 +299,7 @@ router.get('/:id/suggest-budget', requireWorkspace, async (req, res) => {
   if (!cat) return res.status(404).json({ error: 'Category not found' })
 
   if (cat.defaultBudgetId) {
-    const b = await db.collection('budgets')
-      .findOne({ _id: cat.defaultBudgetId, workspaceId: ws, active: { $ne: false } })
+    const b = await db.collection('budgets').findOne({ _id: cat.defaultBudgetId, workspaceId: ws, active: { $ne: false } })
     if (b) return res.json({ budgetId: b._id, name: b.name })
   }
 
