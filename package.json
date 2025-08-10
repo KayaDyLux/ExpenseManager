@@ -1,7 +1,7 @@
 {
   "name": "expensemanager-api",
   "version": "1.0.0",
-  "description": "Expense Manager backend (Express + MongoDB) with WebAuthn + JWT auth",
+  "description": "Expense Manager backend (Express + MongoDB) with WebAuthn + JWT authentication",
   "private": true,
   "main": "server.js",
   "type": "commonjs",
