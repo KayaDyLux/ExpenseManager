@@ -1,16 +1,16 @@
 /**
  * middleware/auth.js
  *
- * Production-ready JWT auth middleware for your WebAuthn stack.
+ * JWT auth + workspace guard for ExpenseManager.
  * - Verifies "Authorization: Bearer <JWT>"
  * - Attaches req.user = { userId, email, accountType, ... }
- * - Optional allowlist check (email or domain) from MongoDB
+ * - Optional allowlist check (email/domain) via Mongo
  * - requireWorkspace() enforces workspaceId in query/body/params
  *
  * Env:
- *   JWT_SECRET              - strong random string (>= 32 chars)
- *   ENFORCE_ALLOWLIST       - "true" | "false" (default: true)
- *   OWNER_EMAIL             - always allowed (default: swapna@swapnade.com)
+ *   JWT_SECRET           (required)
+ *   ENFORCE_ALLOWLIST    "true" | "false" (default: true)
+ *   OWNER_EMAIL          default: swapna@swapnade.com
  */
 
 const jwt = require('jsonwebtoken')
@@ -22,9 +22,9 @@ if (!JWT_SECRET) {
 }
 
 const OWNER_EMAIL = (process.env.OWNER_EMAIL || 'swapna@swapnade.com').toLowerCase()
-const ENFORCE_ALLOWLIST =
-  (process.env.ENFORCE_ALLOWLIST || 'true').toLowerCase() !== 'false'
+const ENFORCE_ALLOWLIST = (process.env.ENFORCE_ALLOWLIST || 'true').toLowerCase() !== 'false'
 
+/** Mint an access token after auth */
 function signAccessToken(payload, opts = {}) {
   const options = {
     issuer: 'expensemanager-api',
@@ -34,6 +34,7 @@ function signAccessToken(payload, opts = {}) {
   return jwt.sign(payload, JWT_SECRET, options)
 }
 
+/** Parse "Authorization: Bearer <token>" */
 function parseBearerHeader(headerValue = '') {
   if (!headerValue || typeof headerValue !== 'string') return null
   const [scheme, token] = headerValue.split(' ')
@@ -41,11 +42,13 @@ function parseBearerHeader(headerValue = '') {
   return { scheme, token }
 }
 
+/** Require a valid JWT (owner/domain allowlist optional) */
 async function authRequired(req, res, next) {
   try {
-    const header = req.headers.authorization
-    const parsed = parseBearerHeader(header)
+    // Let CORS preflights pass
+    if (req.method === 'OPTIONS') return next()
 
+    const parsed = parseBearerHeader(req.headers.authorization)
     if (!parsed || parsed.scheme.toLowerCase() !== 'bearer') {
       return res.status(401).json({ error: 'missing_authorization' })
     }
@@ -64,6 +67,7 @@ async function authRequired(req, res, next) {
 
     if (ENFORCE_ALLOWLIST) {
       const email = (decoded.email || '').toLowerCase()
+
       if (email !== OWNER_EMAIL) {
         const db = req.app?.locals?.db
         if (!db) return res.status(503).json({ error: 'db_unavailable' })
@@ -75,17 +79,21 @@ async function authRequired(req, res, next) {
         if (!allowHit) return res.status(403).json({ error: 'not_allowed' })
       }
     }
+
     return next()
   } catch {
     return res.status(401).json({ error: 'auth_failed' })
   }
 }
 
+/** Ensure a workspaceId is present; attach to req.workspaceId */
 function requireWorkspace(req, res, next) {
-  const wid = req.query.workspaceId || req.body.workspaceId || req.params.workspaceId
-  if (!wid) {
-    return res.status(400).json({ error: 'workspaceId required' })
-  }
+  const wid = (req.query.workspaceId || req.body.workspaceId || req.params.workspaceId || '')
+    .toString()
+    .trim()
+
+  if (!wid) return res.status(400).json({ error: 'workspaceId required' })
+
   req.workspaceId = wid
   next()
 }
