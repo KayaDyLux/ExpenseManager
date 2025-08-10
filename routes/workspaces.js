@@ -1,127 +1,202 @@
 // routes/workspaces.js
-const router = require('express').Router()
-const { authRequired, requireWorkspace } = require('../middleware/auth')
-const { ObjectId } = require('mongodb')
+// Production-ready workspace routes
+// Scope: per-user workspaces (personal/business). No requireWorkspace here (this *provides* workspaces).
 
-// All workspace routes require auth
-router.use(authRequired)
+const express = require('express');
+const mongoose = require('mongoose');
+const { authRequired } = require('../middleware/auth');
 
-/**
- * POST /workspaces/init
- * Ensure personal/business workspaces exist for this user
- * Seeds default categories if new workspaces created
- */
-router.post('/init', async (req, res) => {
-  const db = req.app.locals.db
-  const { accountType } = req.user
-  const userId = new ObjectId(req.user.userId)
-  const typesNeeded = []
+const router = express.Router();
 
-  if (accountType === 'personal' || accountType === 'both') typesNeeded.push('personal')
-  if (accountType === 'business' || accountType === 'both') typesNeeded.push('business')
+// ---------------------------
+// Mongoose Model
+// ---------------------------
+const WorkspaceSchema = new mongoose.Schema(
+  {
+    userId: { type: mongoose.Schema.Types.ObjectId, required: true, index: true },
+    name: { type: String, required: true, trim: true },
+    type: { type: String, enum: ['personal', 'business'], required: true, index: true },
+    color: { type: String, trim: true },
+    icon: { type: String, trim: true },
+    isDefault: { type: Boolean, default: false, index: true },
+  },
+  { timestamps: true }
+);
 
-  const existing = await db.collection('workspaces')
-    .find({ userId, type: { $in: typesNeeded }, active: { $ne: false } })
-    .toArray()
-  const existingTypes = existing.map(ws => ws.type)
+WorkspaceSchema.index({ userId: 1, type: 1, name: 1 });
+// Ensure only one default per user+type via partial unique index
+WorkspaceSchema.index(
+  { userId: 1, type: 1, isDefault: 1 },
+  { unique: true, partialFilterExpression: { isDefault: true } }
+);
 
-  const toCreate = typesNeeded.filter(t => !existingTypes.includes(t))
-  const now = new Date()
+const Workspace = mongoose.models.Workspace || mongoose.model('Workspace', WorkspaceSchema);
 
-  const newWorkspaces = toCreate.map(t => ({
-    userId,
-    type: t,
-    name: t === 'personal' ? 'Personal' : 'Business',
-    currency: 'EUR',
-    startDayOfMonth: 1,
-    active: true,
-    createdAt: now,
-    updatedAt: now
-  }))
+// ---------------------------
+// Helpers
+// ---------------------------
+function scrub(input) {
+  const out = {};
+  if (input.name !== undefined) out.name = String(input.name).trim();
+  if (input.type !== undefined) out.type = String(input.type).trim();
+  if (input.color !== undefined) out.color = String(input.color).trim();
+  if (input.icon !== undefined) out.icon = String(input.icon).trim();
+  if (input.isDefault !== undefined) out.isDefault = Boolean(input.isDefault);
+  return out;
+}
 
-  if (newWorkspaces.length) {
-    await db.collection('workspaces').insertMany(newWorkspaces)
-    // TODO: seed default categories for each new workspace
+async function ensureSingleDefault(userId, type, desiredId) {
+  await Workspace.updateMany({ userId, type, _id: { $ne: desiredId }, isDefault: true }, { $set: { isDefault: false } });
+}
+
+async function ensureAtLeastOne(userId, accountType) {
+  const needPersonal = accountType === 'personal' || accountType === 'both';
+  const needBusiness = accountType === 'business' || accountType === 'both';
+
+  const ops = [];
+  if (needPersonal) {
+    ops.push(
+      (async () => {
+        const exists = await Workspace.findOne({ userId, type: 'personal' });
+        if (!exists) {
+          await Workspace.create({ userId, type: 'personal', name: 'Personal', isDefault: true });
+        }
+      })()
+    );
   }
-
-  const all = await db.collection('workspaces')
-    .find({ userId, active: { $ne: false } })
-    .sort({ type: 1 })
-    .toArray()
-
-  res.json({ workspaces: all })
-})
-
-/**
- * GET /workspaces
- * List active workspaces for logged-in user
- */
-router.get('/', async (req, res) => {
-  const db = req.app.locals.db
-  const userId = new ObjectId(req.user.userId)
-  const docs = await db.collection('workspaces')
-    .find({ userId, active: { $ne: false } })
-    .sort({ type: 1 })
-    .toArray()
-  res.json(docs)
-})
-
-/**
- * GET /workspaces/:id/summary
- * Returns KPIs, budgets, charts for a given workspace
- */
-router.get('/:id/summary', requireWorkspace, async (req, res) => {
-  const db = req.app.locals.db
-  const wsId = new ObjectId(req.params.id)
-
-  const workspace = await db.collection('workspaces').findOne({ _id: wsId })
-  if (!workspace) return res.status(404).json({ error: 'Workspace not found' })
-
-  // TODO: Replace placeholders with actual aggregations
-  res.json({
-    kpis: { cashOnHand: 0, mtdSpend: 0, remainingToBudget: 0 },
-    charts: { spendingOverTime: [], categoryBreakdown: [] },
-    budgets: []
-  })
-})
-
-/**
- * PATCH /workspaces/account-type
- * Upgrade/downgrade account type; archive/unarchive workspaces
- */
-router.patch('/account-type', async (req, res) => {
-  const db = req.app.locals.db
-  const { newType } = req.body
-  const userId = new ObjectId(req.user.userId)
-  const validTypes = ['personal', 'business', 'both']
-
-  if (!validTypes.includes(newType)) {
-    return res.status(400).json({ error: 'Invalid account type' })
+  if (needBusiness) {
+    ops.push(
+      (async () => {
+        const exists = await Workspace.findOne({ userId, type: 'business' });
+        if (!exists) {
+          await Workspace.create({ userId, type: 'business', name: 'Business', isDefault: true });
+        }
+      })()
+    );
   }
+  await Promise.all(ops);
+}
 
-  // Archive workspaces no longer needed
-  const now = new Date()
-  if (newType === 'personal') {
-    await db.collection('workspaces').updateMany(
-      { userId, type: 'business', active: true },
-      { $set: { active: false, archivedAt: now, updatedAt: now } }
-    )
-  } else if (newType === 'business') {
-    await db.collection('workspaces').updateMany(
-      { userId, type: 'personal', active: true },
-      { $set: { active: false, archivedAt: now, updatedAt: now } }
-    )
+// ---------------------------
+// Routes
+// ---------------------------
+
+// List all workspaces for the user
+router.get('/', authRequired, async (req, res, next) => {
+  try {
+    const items = await Workspace.find({ userId: req.user._id }).sort({ type: 1, name: 1 });
+    res.json({ items });
+  } catch (err) {
+    next(err);
   }
+});
 
-  // Reactivate if both selected
-  if (newType === 'both') {
-    await db.collection('workspaces').updateMany(
-      { userId, active: false },
-      { $set: { active: true }, $unset: { archivedAt: '' } }
-    )
+// Ensure default workspaces exist based on accountType
+// body: { accountType: 'personal' | 'business' | 'both' }
+router.post('/ensure', authRequired, async (req, res, next) => {
+  try {
+    const { accountType } = req.body || {};
+    if (!['personal', 'business', 'both'].includes(accountType)) {
+      return res.status(400).json({ error: "accountType must be 'personal', 'business', or 'both'" });
+    }
+    await ensureAtLeastOne(req.user._id, accountType);
+    const items = await Workspace.find({ userId: req.user._id }).sort({ type: 1, name: 1 });
+    res.json({ items });
+  } catch (err) {
+    next(err);
   }
+});
 
-  res.json({ ok: true })
-})
+// Create a workspace
+router.post('/', authRequired, async (req, res, next) => {
+  try {
+    const data = scrub(req.body || {});
+    if (!data.name) return res.status(400).json({ error: 'name is required' });
+    if (!['personal', 'business'].includes(data.type)) return res.status(400).json({ error: "type must be 'personal' or 'business'" });
 
-module.exports = router
+    // If marking as default, clear other defaults of same type
+    if (data.isDefault) {
+      await ensureSingleDefault(req.user._id, data.type);
+    }
+
+    const doc = await Workspace.create({ ...data, userId: req.user._id });
+    res.status(201).json(doc);
+  } catch (err) {
+    if (err?.code === 11000) return res.status(409).json({ error: 'default workspace already exists for this type' });
+    next(err);
+  }
+});
+
+// Get single workspace
+router.get('/:id', authRequired, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ error: 'invalid id' });
+    const doc = await Workspace.findOne({ _id: id, userId: req.user._id });
+    if (!doc) return res.status(404).json({ error: 'not found' });
+    res.json(doc);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Update workspace (name/color/icon/isDefault)
+router.put('/:id', authRequired, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ error: 'invalid id' });
+
+    const update = scrub(req.body || {});
+
+    const doc = await Workspace.findOne({ _id: id, userId: req.user._id });
+    if (!doc) return res.status(404).json({ error: 'not found' });
+
+    if (update.isDefault === true) {
+      await ensureSingleDefault(req.user._id, doc.type, doc._id);
+    }
+
+    Object.assign(doc, update);
+    await doc.save();
+    res.json(doc);
+  } catch (err) {
+    if (err?.code === 11000) return res.status(409).json({ error: 'default workspace already exists for this type' });
+    next(err);
+  }
+});
+
+// Delete workspace
+router.delete('/:id', authRequired, async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    if (!mongoose.isValidObjectId(id)) return res.status(400).json({ error: 'invalid id' });
+
+    const doc = await Workspace.findOne({ _id: id, userId: req.user._id });
+    if (!doc) return res.status(404).json({ error: 'not found' });
+
+    // Safety: prevent deleting the only workspace of a type
+    const countSameType = await Workspace.countDocuments({ userId: req.user._id, type: doc.type });
+    if (countSameType <= 1) {
+      return res.status(400).json({ error: `cannot delete the only ${doc.type} workspace` });
+    }
+
+    await Workspace.deleteOne({ _id: doc._id });
+    res.json({ ok: true });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// Get default workspace per type (handy for onboarding)
+router.get('/defaults/by-type', authRequired, async (req, res, next) => {
+  try {
+    const [personal, business] = await Promise.all([
+      Workspace.findOne({ userId: req.user._id, type: 'personal', isDefault: true }),
+      Workspace.findOne({ userId: req.user._id, type: 'business', isDefault: true }),
+    ]);
+    res.json({ personal, business });
+  } catch (err) {
+    next(err);
+  }
+});
+
+module.exports = router;
