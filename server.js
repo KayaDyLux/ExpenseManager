@@ -1,4 +1,18 @@
-// server.js — Production-ready Express server for ExpenseManager
+// CORS (restrict in production via env)
+// Accept both ORIGIN and CORS_ORIGIN
+const allowedOrigin = process.env.ORIGIN || process.env.CORS_ORIGIN || '*';// ---------------------------
+// App settings
+// ---------------------------
+const isProd = process.env.NODE_ENV === 'production';
+const PORT = process.env.PORT || 8080;
+// Accept both names so rotations never require code changes
+const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+  // Fail fast with a clear message
+  console.error('❌ Missing MONGODB_URI/MONGO_URI in environment.');
+  process.exit(1);
+}// server.js — Production-ready Express server for ExpenseManager
 // Architecture: Node.js + Express + MongoDB (Mongoose)
 // Auth: JWT (HS256) via middleware/auth.js
 // Routing: /api/* for API; SPA served from /public
