@@ -1,87 +1,38 @@
-const express = require("express");
-const { ObjectId } = require("mongodb");
-const router = express.Router();
+const express = require('express')
+const { ObjectId } = require('mongodb')
+const router = express.Router()
+const { authRequired, requireWorkspace } = require('../middleware/auth')
+
+// All budgets routes require auth
+router.use(authRequired)
 
 /**
- * Create a new bucket
+ * GET /budgets?workspaceId=...
  */
-router.post("/", async (req, res) => {
-  try {
-    const db = req.app.locals.db; // or req.db if using helper middleware
-    const bucket = req.body;
-    bucket.createdAt = new Date();
-    bucket.updatedAt = new Date();
-    bucket.workspaceId = new ObjectId(req.user.workspaceId);
-
-    const result = await db.collection("buckets").insertOne(bucket);
-    res.json({ insertedId: result.insertedId });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
+router.get('/budgets', requireWorkspace, async (req, res) => {
+  const db = req.app.locals.db
+  const ws = new ObjectId(req.workspaceId)
+  const docs = await db.collection('budgets')
+    .find({ workspaceId: ws, active: { $ne: false } })
+    .sort({ name_lc: 1 })
+    .toArray()
+  res.json(docs)
+})
 
 /**
- * Fund an existing bucket
+ * POST /budgets
+ * body: { workspaceId, name, target, period, color? }
  */
-router.post("/:id/fund", async (req, res) => {
-  try {
-    const db = req.app.locals.db; // or req.db
-    const bucketId = new ObjectId(req.params.id);
-    const { amount, currency } = req.body;
-
-    await db.collection("bucket_transactions").insertOne({
-      workspaceId: new ObjectId(req.user.workspaceId),
-      bucketId,
-      type: "FUND",
-      amount,
-      currency,
-      createdAt: new Date(),
-      createdBy: new ObjectId(req.user.userId)
-    });
-
-    res.json({ status: "funded" });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
+router.post('/budgets', requireWorkspace, async (req, res) => {
+  const db = req.app.locals.db
+  const { name, target, period, color } = req.body
+  if (!name || !target || !period) {
+    return res.status(400).json({ error: 'name, target, period are required' })
   }
-});
-
-/**
- * Transfer between buckets
- */
-router.post("/transfer", async (req, res) => {
-  try {
-    const db = req.app.locals.db; // or req.db
-    const client = req.app.locals.client; // or req.client if using helper middleware
-    const { fromId, toId, amount, currency } = req.body;
-    const now = new Date();
-
-    const session = client.startSession(); // ✅ fixed to use the MongoClient
-    await session.withTransaction(async () => {
-      await db.collection("bucket_transactions").insertOne({
-        workspaceId: new ObjectId(req.user.workspaceId),
-        bucketId: new ObjectId(fromId),
-        type: "TRANSFER_OUT",
-        amount,
-        currency,
-        createdAt: now,
-        createdBy: new ObjectId(req.user.userId)
-      }, { session });
-
-      await db.collection("bucket_transactions").insertOne({
-        workspaceId: new ObjectId(req.user.workspaceId),
-        bucketId: new ObjectId(toId),
-        type: "TRANSFER_IN",
-        amount,
-        currency,
-        createdAt: now,
-        createdBy: new ObjectId(req.user.userId)
-      }, { session });
-    });
-
-    res.json({ status: "transferred" });
-  } catch (e) {
-    res.status(400).json({ error: e.message });
-  }
-});
-
-module.exports = router;
+  const now = new Date()
+  const doc = {
+    workspaceId: new ObjectId(req.workspaceId),
+    name,
+    name_lc: String(name).trim().toLowerCase(),
+    target: Number(target),
+    period, // 'monthly' | 'quarterly' | 'annu
