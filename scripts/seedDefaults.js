@@ -1,74 +1,74 @@
 // scripts/seedDefaults.js
-// Run: `node scripts/seedDefaults.js`
+// Purpose: Seed a demo user with default workspaces, categories, budgets, income, and expenses.
+// Usage: node scripts/seedDefaults.js
 
-const { MongoClient, ObjectId } = require("mongodb");
+require('dotenv').config();
+const mongoose = require('mongoose');
 
-const uri = process.env.MONGODB_URI;
-const dbName = process.env.MONGODB_DB || "ExpenseManager";
+// Import models (from your existing routes or dedicated models dir)
+require('../routes/workspaces');
+require('../routes/categories');
+require('../routes/budgets');
+require('../routes/income');
+require('../routes/expenses');
 
-async function run() {
-  if (!uri) throw new Error("MONGODB_URI not set");
+const Workspace = mongoose.models.Workspace;
+const Category = mongoose.models.Category;
+const Budget = mongoose.models.Budget;
+const Income = mongoose.models.Income;
+const Expense = mongoose.models.Expense;
 
-  const client = new MongoClient(uri);
-  await client.connect();
-  const db = client.db(dbName);
+async function main() {
+  const MONGO_URI = process.env.MONGODB_URI || process.env.MONGO_URI;
+  if (!MONGO_URI) throw new Error('Missing MONGODB_URI/MONGO_URI in env');
 
-  // Helper upsert
-  async function upsert(collection, filter, doc) {
-    await db.collection(collection).updateOne(filter, { $setOnInsert: doc }, { upsert: true });
-  }
+  await mongoose.connect(MONGO_URI, {
+    maxPoolSize: 10,
+    serverSelectionTimeoutMS: 5000,
+  });
+  console.log('✅ Mongo connected');
 
-  const now = new Date();
+  // TODO: Replace with a real userId from your DB if running in production
+  const userId = new mongoose.Types.ObjectId();
+  console.log(`Using demo userId: ${userId}`);
+
+  // Workspaces
+  const personalWs = await Workspace.create({ userId, type: 'personal', name: 'Personal', isDefault: true });
+  const businessWs = await Workspace.create({ userId, type: 'business', name: 'Business', isDefault: true });
 
   // Categories
-  const personalCategories = ["Groceries", "Utilities", "Rent", "Subscriptions", "Dining Out", "Transport", "Health", "Leisure"];
-  const businessCategories = ["Office Supplies", "Travel", "Meals/Entertainment", "Rent", "Utilities", "Professional Fees", "Salaries", "Marketing", "Miscellaneous"];
+  const categories = await Category.insertMany([
+    { userId, workspaceId: personalWs._id, name: 'Groceries', color: '#4caf50', icon: 'shopping-cart' },
+    { userId, workspaceId: personalWs._id, name: 'Entertainment', color: '#ff9800', icon: 'film' },
+    { userId, workspaceId: businessWs._id, name: 'Office Supplies', color: '#2196f3', icon: 'briefcase' },
+    { userId, workspaceId: businessWs._id, name: 'Travel', color: '#9c27b0', icon: 'plane' },
+  ]);
 
-  for (const name of personalCategories) {
-    await upsert("categories", { name, type: "personal" }, {
-      name,
-      type: "personal",
-      isDefault: true,
-      createdAt: now,
-      updatedAt: now
-    });
-  }
+  // Budgets
+  await Budget.insertMany([
+    { userId, workspaceId: personalWs._id, name: 'Monthly Essentials', limit: 1000 },
+    { userId, workspaceId: personalWs._id, name: 'Fun & Leisure', limit: 300 },
+    { userId, workspaceId: businessWs._id, name: 'Operational Expenses', limit: 2000 },
+  ]);
 
-  for (const name of businessCategories) {
-    await upsert("categories", { name, type: "business" }, {
-      name,
-      type: "business",
-      isDefault: true,
-      createdAt: now,
-      updatedAt: now
-    });
-  }
+  // Income
+  await Income.insertMany([
+    { userId, workspaceId: personalWs._id, amount: 2500, currency: 'EUR', date: new Date(), source: 'Salary' },
+    { userId, workspaceId: businessWs._id, amount: 5000, currency: 'EUR', date: new Date(), source: 'Consulting Invoice' },
+  ]);
 
-  // Buckets
-  const buckets = [
-    { name: "Groceries", type: "expense", currency: "EUR", rules: { lockWhenEmpty: true } },
-    { name: "Dining Out", type: "expense", currency: "EUR", rules: { lockWhenEmpty: true } },
-    { name: "Transport", type: "expense", currency: "EUR", rules: { lockWhenEmpty: true } },
-    { name: "Emergency Fund", type: "savings", currency: "EUR", rules: { savingsFundedFirst: true } },
-    { name: "Operating", type: "expense", currency: "EUR" },
-    { name: "VAT Reserve", type: "reserve", currency: "EUR", rules: { lockWhenEmpty: true } },
-    { name: "Business Travel", type: "expense", currency: "EUR", rules: { lockWhenEmpty: true } },
-    { name: "Meals", type: "expense", currency: "EUR", rules: { lockWhenEmpty: true } }
-  ];
+  // Expenses
+  await Expense.insertMany([
+    { userId, workspaceId: personalWs._id, amount: 50, currency: 'EUR', date: new Date(), categoryId: categories[0]._id, notes: 'Weekly groceries' },
+    { userId, workspaceId: personalWs._id, amount: 20, currency: 'EUR', date: new Date(), categoryId: categories[1]._id, notes: 'Movie night' },
+    { userId, workspaceId: businessWs._id, amount: 200, currency: 'EUR', date: new Date(), categoryId: categories[2]._id, notes: 'Printer ink' },
+  ]);
 
-  for (const b of buckets) {
-    await upsert("buckets", { name: b.name, type: b.type }, {
-      ...b,
-      createdAt: now,
-      updatedAt: now
-    });
-  }
-
-  console.log("Defaults seeded.");
-  await client.close();
+  console.log('🌱 Seed complete');
+  await mongoose.disconnect();
 }
 
-run().catch(err => {
-  console.error(err);
+main().catch(err => {
+  console.error('Seed error:', err);
   process.exit(1);
 });
