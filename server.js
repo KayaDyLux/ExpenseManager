@@ -1,122 +1,182 @@
-// server.js – ExpenseManager API (production-ready)
+// server.js — Production-ready Express server for ExpenseManager
+// Architecture: Node.js + Express + MongoDB (Mongoose)
+// Auth: JWT (HS256) via middleware/auth.js
+// Routing: /api/* for API; SPA served from /public
+// Notes:
+//  - Applies authRequired globally to /api (all protected)
+//  - requireWorkspace enforced inside workspace-aware routers
+//  - Proper static serving with API exclusions
+//  - Health checks, security headers, CORS, compression, logging (dev), error handling
+//  - Graceful shutdown
 
-require('dotenv').config()
-const express = require('express')
-const cors = require('cors')
-const helmet = require('helmet')
-const compression = require('compression')
-const fs = require('fs')
-const path = require('path')
-const { MongoClient } = require('mongodb')
-const { authRequired } = require('./middleware/auth')
+require('dotenv').config();
 
-// ---- Route imports ----
-const categoriesRoutes = require('./routes/categories')
-const budgetsRoutes = require('./routes/budgets') // replaces old buckets
-const expensesRoutes = require('./routes/expenses')
-const workspacesRoutes = require('./routes/workspaces')
-const incomeRoutes = require('./routes/income')
+const express = require('express');
+const mongoose = require('mongoose');
+const path = require('path');
+const compression = require('compression');
+const helmet = require('helmet');
+const cors = require('cors');
+const morgan = require('morgan');
 
-const app = express()
-const PORT = process.env.PORT || 8080
-const MONGODB_URI = process.env.MONGODB_URI || process.env.DATABASE_URL
-const MONGODB_DB = process.env.MONGODB_DB || 'ExpenseManager'
+// Auth middleware
+const { authRequired } = require('./middleware/auth');
 
-if (!MONGODB_URI) {
-  console.error('❌ Missing MONGODB_URI')
-  process.exit(1)
+// Routers
+const categoriesRoutes = require('./routes/categories');
+const budgetsRoutes = require('./routes/budgets');
+const expensesRoutes = require('./routes/expenses');
+const workspacesRoutes = require('./routes/workspaces');
+const incomeRoutes = require('./routes/income');
+
+const app = express();
+
+// ---------------------------
+// App settings
+// ---------------------------
+const isProd = process.env.NODE_ENV === 'production';
+const PORT = process.env.PORT || 8080;
+const MONGO_URI = process.env.MONGO_URI;
+
+if (!MONGO_URI) {
+  // Fail fast with a clear message
+  console.error('❌ Missing MONGO_URI in environment.');
+  process.exit(1);
 }
 
-// ---- Middleware ----
-app.disable('x-powered-by')
-app.use(helmet({ contentSecurityPolicy: false }))
-app.use(compression())
-app.use(express.json({ limit: '1mb' }))
-app.use(express.urlencoded({ extended: true }))
+// If behind a proxy/load balancer (DigitalOcean App Platform)
+app.set('trust proxy', 1);
 
-// ---- CORS ----
-const allowedOrigins = [
-  'http://localhost:5173',
-  process.env.ORIGIN, // your deployed frontend
-].filter(Boolean)
+// ---------------------------
+// Middlewares
+// ---------------------------
+app.use(helmet({
+  crossOriginResourcePolicy: { policy: 'cross-origin' },
+}));
+app.use(compression());
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true }));
 
-app.use(cors({
-  origin: (origin, cb) => {
-    if (!origin || allowedOrigins.includes(origin)) return cb(null, true)
-    return cb(new Error('CORS not allowed'))
-  },
-  methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Authorization', 'Content-Type'],
-}))
+// CORS (restrict in production via env)
+const allowedOrigin = process.env.CORS_ORIGIN || '*';
+app.use(
+  cors({
+    origin: allowedOrigin,
+    credentials: true,
+  })
+);
 
-// ---- Public endpoints ----
-app.get('/health', async (req, res) => {
+if (!isProd) {
+  app.use(morgan('dev'));
+}
+
+// ---------------------------
+// Health checks (public)
+// ---------------------------
+app.get('/healthz', (req, res) => res.status(200).json({ ok: true, uptime: process.uptime() }));
+
+// ---------------------------
+// API (protected by default)
+// ---------------------------
+// If you have public API routes, mount them BEFORE this line.
+app.use('/api', authRequired);
+
+app.use('/api/categories', categoriesRoutes);
+app.use('/api/budgets', budgetsRoutes);
+app.use('/api/expenses', expensesRoutes);
+app.use('/api/workspaces', workspacesRoutes);
+app.use('/api/income', incomeRoutes);
+
+// 404 for unknown API routes
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: 'Not found' });
+});
+
+// ---------------------------
+// Static (SPA)
+// ---------------------------
+const publicDir = path.join(__dirname, 'public');
+app.use(express.static(publicDir, { maxAge: isProd ? '1d' : 0 }));
+
+// Send index.html for non-API routes (client-side routing)
+app.get(/^(?!\/api\/).*/, (req, res) => {
+  res.sendFile(path.join(publicDir, 'index.html'));
+});
+
+// ---------------------------
+// Error handler (last)
+// ---------------------------
+// eslint-disable-next-line no-unused-vars
+app.use((err, req, res, next) => {
+  console.error('Unhandled error:', err);
+  const status = err.status || 500;
+  res.status(status).json({ error: err.message || 'Internal Server Error' });
+});
+
+// ---------------------------
+// Mongo connection & Indexes
+// ---------------------------
+mongoose.set('strictQuery', true);
+
+async function connectMongoWithRetry() {
+  const opts = {
+    maxPoolSize: 20,
+    serverSelectionTimeoutMS: 10_000,
+  };
   try {
-    await req.app.locals.db.command({ ping: 1 })
-    res.json({ status: 'ok', time: new Date().toISOString() })
+    await mongoose.connect(MONGO_URI, opts);
+    console.log('✅ Mongo connected:', mongoose.connection.name);
+
+    // Enforce critical indexes defined in schemas once connected
+    await ensureIndexes();
+
+    // Start server only after successful Mongo connection
+    startServer();
   } catch (err) {
-    res.status(500).json({ status: 'error', error: err.message })
-  }
-})
-
-// ---- Protected API ----
-app.use(authRequired)
-app.use('/categories', categoriesRoutes)
-app.use('/budgets', budgetsRoutes)
-app.use('/expenses', expensesRoutes)
-app.use('/workspaces', workspacesRoutes)
-app.use('/', incomeRoutes) // income.js defines full /income-* paths
-
-// ---- Serve SPA ----
-const distDir = path.join(__dirname, 'dist')
-const publicDir = fs.existsSync(distDir) ? distDir : path.join(__dirname, 'public')
-app.use(express.static(publicDir))
-
-app.get('*', (req, res) => {
-  const apiPrefixes = ['/health', '/categories', '/budgets', '/expenses', '/workspaces', '/income']
-  if (apiPrefixes.some(p => req.path.startsWith(p))) {
-    return res.status(404).json({ error: 'Not found' })
-  }
-  res.sendFile(path.join(publicDir, 'index.html'))
-})
-
-// ---- Start server after DB connect ----
-let client
-async function init() {
-  try {
-    client = new MongoClient(MONGODB_URI, { maxPoolSize: 10 })
-    await client.connect()
-    const db = client.db(MONGODB_DB)
-    await db.command({ ping: 1 })
-
-    // Indexes for performance & uniqueness
-    await db.collection('categories').createIndex(
-      { workspaceId: 1, name_lc: 1, active: 1 },
-      { unique: true }
-    )
-    await db.collection('budgets').createIndex(
-      { workspaceId: 1, name_lc: 1, active: 1 },
-      { unique: true }
-    )
-    await db.collection('users').createIndex({ email: 1 }, { unique: true })
-
-    app.locals.db = db
-    console.log(`✅ Mongo connected: ${MONGODB_DB}`)
-
-    app.listen(PORT, () => {
-      console.log(`🚀 Server running on port ${PORT}`)
-    })
-  } catch (err) {
-    console.error('❌ Mongo connection failed:', err.message)
-    process.exit(1)
+    console.error('Mongo connection failed, retrying in 5s:', err.message);
+    setTimeout(connectMongoWithRetry, 5000);
   }
 }
 
-init()
+async function ensureIndexes() {
+  // Lazy-load models to ensure mongoose.models is populated
+  // (Importing routers above may already register models.)
+  const models = mongoose.models;
+  const critical = ['Category', 'Budget', 'Expense', 'Workspace', 'Income', 'User'];
+  for (const name of critical) {
+    const mdl = models[name];
+    if (mdl && typeof mdl.ensureIndexes === 'function') {
+      try {
+        await mdl.ensureIndexes();
+        // Some Mongoose versions use createIndexes/ensureIndexes interchangeably
+      } catch (e) {
+        if (mdl.createIndexes) await mdl.createIndexes();
+      }
+    }
+  }
+  console.log('🔧 Index enforcement done');
+}
 
-// ---- Graceful shutdown ----
-process.on('SIGTERM', async () => {
-  console.log('Shutting down...')
-  await client?.close()
-  process.exit(0)
-})
+let server;
+function startServer() {
+  server = app.listen(PORT, () => {
+    console.log(`🚀 Server running on port ${PORT}`);
+  });
+}
+
+// Graceful shutdown
+function shutdown(signal) {
+  console.log(`\n${signal} received. Shutting down gracefully...`);
+  server && server.close(() => {
+    mongoose.connection.close(false).then(() => {
+      console.log('🛑 Mongo disconnected. Bye.');
+      process.exit(0);
+    });
+  });
+}
+
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Boot
+connectMongoWithRetry();
